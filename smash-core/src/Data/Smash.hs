@@ -1,10 +1,8 @@
 {-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications #-}
 -- |
 -- Module       : Data.Smash
@@ -60,9 +58,9 @@ module Data.Smash
 ) where
 
 
-import Control.Applicative (Alternative(..))
+import Control.Applicative (Alternative(..), liftA2)
 import Control.DeepSeq (NFData(..))
-
+import Control.Monad (MonadPlus)
 import Data.Bifunctor
 import Data.Bifoldable
 import Data.Binary (Binary(..))
@@ -75,7 +73,7 @@ import Data.Wedge (Wedge(..))
 import Data.Semigroup (Semigroup(..))
 #endif
 
-
+import Control.Monad.Zip (MonadZip (mzip))
 import GHC.Generics
 
 import Internal
@@ -384,6 +382,13 @@ instance Monoid a => Applicative (Smash a) where
   _ <*> Nada = Nada
   Smash a f <*> Smash c d = Smash (a `mappend` c) (f d)
 
+instance Monoid a => Alternative (Smash a) where
+  empty = Nada
+
+  Nada <|> x = x
+  x@(Smash _ _) <|> Nada = x
+  Smash x y <|> Smash x' _ = Smash (x <> x') y
+
 instance Monoid a => Monad (Smash a) where
   return = pure
   (>>) = (*>)
@@ -392,6 +397,22 @@ instance Monoid a => Monad (Smash a) where
   Smash a b >>= k = case k b of
     Nada -> Nada
     Smash c d -> Smash (a `mappend` c) d
+
+instance Monoid a => MonadFail (Smash a) where
+  fail _ = Nada
+
+instance (Monoid a) => MonadPlus (Smash a)
+
+instance (Monoid a) => MonadZip (Smash a) where
+  mzip = liftA2 (,)
+
+instance Foldable (Smash a) where
+  foldMap f = smash mempty (const f)
+
+instance Traversable (Smash a) where
+  traverse f = \case
+    Nada -> pure Nada
+    Smash x y -> Smash x <$> f y
 
 instance (Semigroup a, Semigroup b) => Semigroup (Smash a b) where
   Nada <> b = b

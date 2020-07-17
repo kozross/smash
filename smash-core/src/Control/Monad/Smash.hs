@@ -1,9 +1,9 @@
 {-# LANGUAGE KindSignatures #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE TupleSections #-}
 
 -- |
 -- Module: Control.Monad.Smash
@@ -12,7 +12,7 @@
 --
 -- Maintainer: Koz Ross <koz.ross@retro-freedom.nz>
 -- Stability: Experimental
--- Portability: KindSignatures, LambdaCase, FlexibleInstances,
+-- Portability: KindSignatures, FlexibleInstances,
 -- MultiParamTypeClasses, UndecidableInstances
 --
 -- Some prose will go here one day.
@@ -21,6 +21,7 @@ module Control.Monad.Smash (
   liftSmashT)
   where
 
+import Control.Monad.Writer (MonadWriter (tell, listen, pass))
 import GHC.Generics (Generic1)
 import Control.Monad.Except (MonadError (throwError, catchError))
 import Control.Monad.State (MonadState (get, put), gets)
@@ -30,9 +31,9 @@ import Data.Bifoldable (Bifoldable (bifoldMap))
 import Data.Bifunctor (Bifunctor (bimap))
 import Control.Monad.Zip (MonadZip (mzip))
 import Control.Monad.IO.Class (MonadIO (liftIO))
-import Control.Monad (MonadPlus)
+import Control.Monad (MonadPlus, (<=<))
 import Data.Kind (Type)
-import Data.Smash (Smash (Smash, Nada), smash)
+import Data.Smash (Smash (Smash, Nada))
 import Control.Applicative (liftA2, Alternative (empty, (<|>)))
 import Data.Functor.Classes (Eq2 (liftEq2), Eq1 (liftEq), Ord1 (liftCompare))
 
@@ -82,9 +83,13 @@ instance (Applicative m, Monoid a) => Applicative (SmashT m a) where
   pure = SmashT . pure . Smash mempty
   SmashT fs <*> SmashT xs = SmashT (liftA2 (<*>) fs xs)
 
-instance (Alternative m, Monoid a) => Alternative (SmashT m a) where
-  empty = SmashT empty
-  SmashT x <|> SmashT y = SmashT (x <|> y)
+instance (Applicative m, Monoid a) => Alternative (SmashT m a) where
+  empty = SmashT . pure $ Nada
+  SmashT x <|> SmashT y = SmashT (go <$> x <*> y)
+    where
+      go Nada x' = x'
+      go x'@(Smash _ _) Nada = x'
+      go (Smash x' y') (Smash x'' _) = Smash (x' <> x'') y'
 
 instance (Monad m, Monoid a) => Monad (SmashT m a) where
   x >>= f = SmashT $ do 
@@ -106,22 +111,13 @@ instance (MonadIO m, Monoid a) => MonadIO (SmashT m a) where
   liftIO = SmashT . fmap (Smash mempty) . liftIO
 
 instance (Monad m, Monoid a) => MonadZip (SmashT m a) where
-  SmashT x `mzip` SmashT y = SmashT (go <$> x <*> y)
-    where
-      go Nada _ = Nada
-      go _ Nada = Nada
-      go (Smash x' y') (Smash x'' y'') = 
-        Smash (x' <> x'') (y', y'')
+  SmashT x `mzip` SmashT y = SmashT (liftA2 (liftA2 (,)) x y)
 
 instance (Foldable m) => Foldable (SmashT m a) where
-  foldMap f = foldMap (smash mempty (\_ x -> f x)) . runSmashT
+  foldMap f = foldMap (foldMap f) . runSmashT
 
 instance (Traversable m) => Traversable (SmashT m a) where
-  traverse f = fmap SmashT . traverse go . runSmashT
-    where 
-      go = \case
-        Nada -> pure Nada
-        Smash x y -> Smash x <$> f y
+  traverse f = fmap SmashT . traverse (traverse f) . runSmashT
 
 instance (Functor m) => Bifunctor (SmashT m) where
   bimap f g = SmashT . fmap (bimap f g) . runSmashT
@@ -145,4 +141,14 @@ instance (MonadError e m, Monoid a) => MonadError e (SmashT m a) where
   catchError (SmashT comp) recover = 
     SmashT . catchError comp $ (runSmashT . recover)
 
--- MonadWriter is questionable (due to listen)
+instance (MonadWriter w m, Monoid a, Monoid w) => 
+  MonadWriter w (SmashT m a) where
+  tell x = SmashT (Smash mempty <$> tell x)
+  listen = SmashT . fmap go . listen . runSmashT
+    where
+      go (sm, x) = (,) <$> sm <*> pure x
+  pass = SmashT . pass . fmap go . runSmashT
+    where
+      go sm = (fmap fst sm,) $ case sm of
+        Nada -> _ -- nothing I can possibly give here except like, id
+        Smash _ (_, f) -> f
